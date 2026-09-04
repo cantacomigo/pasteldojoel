@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ChevronLeft, Loader2, Receipt as ReceiptIcon } from 'lucide-react';
+import { ChevronLeft, Loader2, Receipt as ReceiptIcon, Trash2 } from 'lucide-react';
 import { Order, OrderStatus, OrderItem, MenuItem, Addon, Filling, MenuItemFilling, PaymentMethod, CategoryItem, OrderType, Payment, DEFAULT_CATEGORIES } from '@/types';
 import { StorageService } from '@/services/storageService';
 import { subscribeToCollection } from '@/integrations/firebase/config';
@@ -19,6 +19,7 @@ const OrderDetailsPage: React.FC = () => {
   const navigate = useNavigate();
   const [order, setOrder] = useState<Order | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isDeleting, setIsDeleting] = useState(false);
   
   // Modals
   const [isItemModalOpen, setIsItemModalOpen] = useState(false);
@@ -354,9 +355,17 @@ const OrderDetailsPage: React.FC = () => {
   };
 
   const handleDeleteOrder = async () => {
-    if (!order) return;
-    await StorageService.deleteOrder(order.id);
-    navigate('/');
+    if (!order || isDeleting) return;
+    try {
+      setIsDeleting(true);
+      await StorageService.deleteOrder(order.id);
+      setIsDeleteModalOpen(false);
+      navigate('/', { replace: true });
+    } catch (e) {
+      console.error("Erro ao excluir comanda:", e);
+      setIsDeleting(false);
+      alert("Erro ao excluir comanda. Tente novamente.");
+    }
   };
 
   if (isLoading) {
@@ -404,7 +413,7 @@ const OrderDetailsPage: React.FC = () => {
                 {(order.customerName || '').replace(/^X\s*/i, '')}
             </h2>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
             <span className={`px-4 py-1.5 rounded-full text-[9px] font-black uppercase tracking-[0.2em] border transition-all duration-500 ${isOpen ? 'bg-green-600/10 text-green-600 border-green-500/20 shadow-sm' : 'bg-slate-200 text-slate-600 border-black/5 uppercase'}`}>
                 {isOpen ? 'Comanda Ativa' : 'Comanda Encerrada'}
             </span>
@@ -417,6 +426,14 @@ const OrderDetailsPage: React.FC = () => {
                 {order.orderType}
               </span>
             )}
+            <button
+              type="button"
+              onClick={() => setIsDeleteModalOpen(true)}
+              className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-100/50 rounded-xl transition-all"
+              title="Excluir comanda"
+            >
+              <Trash2 size={18} />
+            </button>
         </div>
       </div>
 
@@ -511,8 +528,9 @@ const OrderDetailsPage: React.FC = () => {
         title="Excluir Comanda"
         message="Tem certeza que deseja excluir esta comanda permanentemente? Esta ação não pode ser desfeita."
         isDestructive={true}
+        isLoading={isDeleting}
         onConfirm={handleDeleteOrder}
-        onCancel={() => setIsDeleteModalOpen(false)}
+        onCancel={() => !isDeleting && setIsDeleteModalOpen(false)}
       />
     </div>
   );

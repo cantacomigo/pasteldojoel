@@ -38,13 +38,27 @@ const PaymentModal: React.FC<PaymentModalProps> = ({
   ]);
   const [isConfirming, setIsConfirming] = useState(false);
   const [customers, setCustomers] = useState<MonthlyCustomer[]>([]);
+  const [selectedFiadoCustomerId, setSelectedFiadoCustomerId] = useState<string>('');
   const firstInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (isPaymentModalOpen) {
-      StorageService.getCustomers().then(setCustomers);
+      StorageService.getCustomers().then(custs => {
+        setCustomers(custs);
+        if (order) {
+          const match = custs.find(c => 
+            (order.customerId && c.id === order.customerId) ||
+            c.name.toLowerCase().trim() === order.customerName.toLowerCase().trim()
+          );
+          if (match) {
+            setSelectedFiadoCustomerId(match.id);
+          } else {
+            setSelectedFiadoCustomerId('');
+          }
+        }
+      });
     }
-  }, [isPaymentModalOpen]);
+  }, [isPaymentModalOpen, order]);
 
   useEffect(() => {
     if (isPaymentModalOpen && order) {
@@ -64,10 +78,12 @@ const PaymentModal: React.FC<PaymentModalProps> = ({
   const progress = Math.min(100, (totalCollected / total) * 100);
   const hasCashEntry = entries.some(e => e.method === PaymentMethod.CASH && parseFloat(e.amount) > 0);
   const hasFiadoEntry = entries.some(e => e.method === PaymentMethod.FIADO && parseFloat(e.amount) > 0);
+  const fiadoTotalAmount = entries
+    .filter(e => e.method === PaymentMethod.FIADO)
+    .reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
   
-  const matchingCustomer = customers.find(c => 
-    c.name.toLowerCase().trim() === order.customerName.toLowerCase().trim()
-  );
+  const matchingCustomer = customers.find(c => c.id === selectedFiadoCustomerId) ||
+    customers.find(c => c.name.toLowerCase().trim() === order.customerName.toLowerCase().trim());
 
   const canConfirm = totalCollected >= total - 0.01 && (!hasFiadoEntry || !!matchingCustomer);
 
@@ -95,6 +111,9 @@ const PaymentModal: React.FC<PaymentModalProps> = ({
     if (!canConfirm || isConfirming) return;
     setIsConfirming(true);
     try {
+      if (hasFiadoEntry && matchingCustomer) {
+        order.customerId = matchingCustomer.id;
+      }
       const payments: Payment[] = entries
         .filter(e => parseFloat(e.amount) > 0)
         .map(e => ({ method: e.method, amount: parseFloat(e.amount) }));
@@ -279,29 +298,72 @@ const PaymentModal: React.FC<PaymentModalProps> = ({
               )}
             </div>
 
-            {/* ── Fiado Status ── */}
+            {/* ── Fiado Status & Customer Selector ── */}
             {hasFiadoEntry && (
-              <div className={`flex items-start gap-3 p-4 rounded-xl border animate-in slide-in-from-bottom-2 duration-300 ${
-                matchingCustomer 
-                  ? 'bg-emerald-500/5 border-emerald-500/20' 
-                  : 'bg-amber-500/5 border-amber-500/20'
-              }`}>
+              <div className="p-4 rounded-2xl border border-black/[0.08] bg-slate-50 space-y-3 animate-in slide-in-from-bottom-2 duration-300">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <UserCheck size={16} className={matchingCustomer ? "text-emerald-600" : "text-amber-600"} />
+                    <span className="text-[10px] font-black text-slate-800 uppercase tracking-wider">
+                      Vincular Comanda ao Mensalista
+                    </span>
+                  </div>
+                  {matchingCustomer && (
+                    <span className="text-[9px] font-bold px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-700 uppercase">
+                      Vinculado
+                    </span>
+                  )}
+                </div>
+
+                {/* Dropdown selector */}
+                <div className="space-y-1">
+                  <select
+                    value={matchingCustomer?.id || ''}
+                    onChange={(e) => setSelectedFiadoCustomerId(e.target.value)}
+                    className="w-full bg-white border border-black/[0.1] rounded-xl px-3 py-2.5 text-xs font-bold text-slate-800 outline-none focus:border-brand-600 shadow-sm"
+                  >
+                    <option value="">Selecione um mensalista cadastrado...</option>
+                    {customers.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name} {c.company ? `(${c.company})` : ''} - Saldo Atual: {fmt(c.balance)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
                 {matchingCustomer ? (
-                  <>
-                    <UserCheck size={16} className="text-emerald-600 shrink-0 mt-0.5" />
-                    <div>
-                      <p className="text-[10px] font-black text-emerald-600 uppercase tracking-widest">Mensalista Identificado</p>
-                      <p className="text-[9px] text-slate-500 mt-0.5">O valor de fiado será somado ao saldo de <span className="text-slate-900 font-bold">{matchingCustomer.name}</span></p>
+                  <div className="bg-white p-3 rounded-xl border border-black/[0.05] space-y-1.5 text-xs">
+                    <div className="flex justify-between font-medium text-slate-600">
+                      <span>Saldo Atual do Cliente:</span>
+                      <span className="font-bold text-slate-900">{fmt(matchingCustomer.balance)}</span>
                     </div>
-                  </>
+                    <div className="flex justify-between font-bold text-slate-900 border-t border-dotted border-black/10 pt-1">
+                      <span>Novo Saldo com este Fiado (+{fmt(fiadoTotalAmount)}):</span>
+                      <span className="text-brand-600 font-black font-display italic">
+                        {fmt(matchingCustomer.balance + fiadoTotalAmount)}
+                      </span>
+                    </div>
+                    {typeof matchingCustomer.creditLimit === 'number' && matchingCustomer.creditLimit > 0 && (
+                      <div className="pt-1 text-[10px]">
+                        {matchingCustomer.balance + fiadoTotalAmount > matchingCustomer.creditLimit ? (
+                          <span className="text-red-600 font-black flex items-center gap-1">
+                            <AlertCircle size={12} /> Atenção: Ultrapassará o limite de {fmt(matchingCustomer.creditLimit)}
+                          </span>
+                        ) : (
+                          <span className="text-slate-500 font-medium">
+                            Limite disponível restante: {fmt(Math.max(0, matchingCustomer.creditLimit - (matchingCustomer.balance + fiadoTotalAmount)))}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 ) : (
-                  <>
-                    <AlertCircle size={16} className="text-amber-600 shrink-0 mt-0.5" />
-                    <div>
-                      <p className="text-[10px] font-black text-amber-600 uppercase tracking-widest">Cliente não encontrado</p>
-                      <p className="text-[9px] text-slate-500 mt-0.5">Para usar FIADO, o nome da comanda (<span className="text-slate-900 font-bold">{order.customerName}</span>) deve ser igual ao nome de um mensalista cadastrado.</p>
-                    </div>
-                  </>
+                  <div className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/20 rounded-xl p-3 text-amber-900 text-xs">
+                    <AlertCircle size={15} className="text-amber-600 shrink-0 mt-0.5" />
+                    <p className="text-[11px] leading-tight">
+                      Para confirmar venda como <strong>FIADO</strong>, selecione o mensalista responsável na lista acima.
+                    </p>
+                  </div>
                 )}
               </div>
             )}

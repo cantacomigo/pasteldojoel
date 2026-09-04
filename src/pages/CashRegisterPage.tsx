@@ -10,16 +10,28 @@ import DailyReportReceipt from '@/components/reports/DailyReportReceipt';
 import { PaymentMethod } from '@/types';
 
 const CashRegisterPage: React.FC = () => {
-  const [currentSession, setCurrentSession] = useState<CashRegisterSession | null>(null);
+  const [currentSession, setCurrentSession] = useState<CashRegisterSession | null>(() => {
+    try {
+      const stored = localStorage.getItem('pastelaria_cash_sessions');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          return parsed.find((s: any) => s.status === 'OPEN') || null;
+        }
+      }
+    } catch {}
+    return null;
+  });
   const [cashSales, setCashSales] = useState(0);
   const [pixSales, setPixSales] = useState(0);
   const [debitSales, setDebitSales] = useState(0);
   const [creditSales, setCreditSales] = useState(0);
   const [totalBleeds, setTotalBleeds] = useState(0);
   const [totalSupplies, setTotalSupplies] = useState(0);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isOpening, setIsOpening] = useState(false);
   
-  const [openingBalanceInput, setOpeningBalanceInput] = useState('');
+  const [openingBalanceInput, setOpeningBalanceInput] = useState('0');
   
   // Transaction Modal State
   const [isTxModalOpen, setIsTxModalOpen] = useState(false);
@@ -32,14 +44,24 @@ const CashRegisterPage: React.FC = () => {
   const [closingBalanceInput, setClosingBalanceInput] = useState('');
 
   // Detailed Count State
-  const [isDetailedMode, setIsDetailedMode] = useState(true);
+  const [isDetailedMode, setIsDetailedMode] = useState(false);
   const [openingBreakdown, setOpeningBreakdown] = useState<CashBreakdown | undefined>();
   const [closingBreakdown, setClosingBreakdown] = useState<CashBreakdown | undefined>();
 
-  useEffect(() => { refreshData(); }, []);
+  useEffect(() => { 
+    refreshData(true); 
 
-  const refreshData = async () => {
-    setIsLoading(true);
+    const handleSessionChange = () => refreshData(true);
+    window.addEventListener('cash-session-changed', handleSessionChange);
+    window.addEventListener('storage', handleSessionChange);
+    return () => {
+      window.removeEventListener('cash-session-changed', handleSessionChange);
+      window.removeEventListener('storage', handleSessionChange);
+    };
+  }, []);
+
+  const refreshData = async (silent = false) => {
+    if (!silent && !currentSession) setIsLoading(true);
     const session = await StorageService.getCurrentSession();
     setCurrentSession(session);
     if (session) {
@@ -63,11 +85,25 @@ const CashRegisterPage: React.FC = () => {
   };
 
   const handleOpenRegister = async () => {
-    if (!openingBalanceInput) return;
-    await StorageService.openSession(parseFloat(openingBalanceInput), openingBreakdown);
-    setOpeningBalanceInput('');
-    setOpeningBreakdown(undefined);
-    refreshData();
+    if (isOpening) return;
+    const balance = openingBalanceInput.trim() === '' ? 0 : parseFloat(openingBalanceInput);
+    if (isNaN(balance) || balance < 0) {
+      alert("Por favor, informe um valor válido para o fundo de caixa.");
+      return;
+    }
+
+    try {
+      setIsOpening(true);
+      const session = await StorageService.openSession(balance, openingBreakdown);
+      setCurrentSession(session);
+      setOpeningBalanceInput('0');
+      setOpeningBreakdown(undefined);
+      await refreshData(true);
+    } catch (error) {
+      console.error("Erro ao abrir caixa:", error);
+    } finally {
+      setIsOpening(false);
+    }
   };
 
   const handleAddTransaction = async () => {
@@ -124,13 +160,23 @@ const CashRegisterPage: React.FC = () => {
             <div className="space-y-6 relative z-10 text-left">
                 <div className="flex items-center justify-between mb-4 px-2">
                     <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Modo de Entrada</span>
-                    <button 
-                        onClick={() => setIsDetailedMode(!isDetailedMode)}
-                        className={`text-[9px] font-black px-3 py-1.5 rounded-lg uppercase tracking-widest border transition-all flex items-center gap-2 ${isDetailedMode ? 'bg-brand-600/10 text-brand-500 border-brand-500/20 shadow-sm' : 'bg-black/5 text-slate-400 border-black/10'}`}
-                    >
-                        <Calculator size={12} />
-                        {isDetailedMode ? 'Contagem Detalhada' : 'Entrada Rápida'}
-                    </button>
+                    <div className="flex items-center bg-black/5 p-1 rounded-xl border border-black/5 gap-1">
+                        <button 
+                            type="button"
+                            onClick={() => setIsDetailedMode(false)}
+                            className={`text-[9px] font-black px-3 py-1.5 rounded-lg uppercase tracking-widest transition-all flex items-center gap-1.5 ${!isDetailedMode ? 'bg-white text-brand-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+                        >
+                            Entrada Rápida
+                        </button>
+                        <button 
+                            type="button"
+                            onClick={() => setIsDetailedMode(true)}
+                            className={`text-[9px] font-black px-3 py-1.5 rounded-lg uppercase tracking-widest transition-all flex items-center gap-1.5 ${isDetailedMode ? 'bg-white text-brand-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+                        >
+                            <Calculator size={11} />
+                            Contagem
+                        </button>
+                    </div>
                 </div>
 
                 {isDetailedMode ? (
@@ -141,18 +187,45 @@ const CashRegisterPage: React.FC = () => {
                         }}
                     />
                 ) : (
-                    <div className="text-left">
-                        <label className="text-[10px] font-black text-slate-600 uppercase tracking-[0.2em] ml-2 mb-2 block">Fundo de Caixa Inicial</label>
+                    <div className="text-left space-y-3">
+                        <label className="text-[10px] font-black text-slate-600 uppercase tracking-[0.2em] ml-2 block">Fundo de Caixa Inicial</label>
                         <div className="relative">
                             <span className="absolute left-5 top-1/2 -translate-y-1/2 text-brand-500 font-black text-sm uppercase px-2 border-r border-black/5">R$</span>
                             <input 
                                 type="number"
+                                step="any"
+                                min="0"
                                 value={openingBalanceInput}
                                 onChange={(e) => setOpeningBalanceInput(e.target.value)}
                                 onKeyDown={(e) => e.key === 'Enter' && handleOpenRegister()}
-                                className="w-full pl-16 pr-6 py-5 rounded-2xl bg-black/[0.02] border border-black/10 text-slate-900 text-xl font-black outline-none focus:border-brand-600 transition-all"
-                                placeholder="0,00"
+                                className="w-full pl-16 pr-6 py-5 rounded-2xl bg-black/[0.02] border border-black/10 text-slate-900 text-2xl font-black outline-none focus:border-brand-600 focus:bg-white transition-all shadow-inner"
+                                placeholder="0"
                             />
+                        </div>
+
+                        {/* Quick preset fund buttons */}
+                        <div className="flex items-center gap-2 pt-1 flex-wrap">
+                            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Atalhos:</span>
+                            {[0, 50, 100, 150, 200].map((val) => {
+                                const isSelected = openingBalanceInput === val.toString() || (val === 0 && (openingBalanceInput === '' || openingBalanceInput === '0'));
+                                return (
+                                    <button
+                                        key={val}
+                                        type="button"
+                                        onClick={() => {
+                                            setOpeningBalanceInput(val.toString());
+                                            setOpeningBreakdown(undefined);
+                                        }}
+                                        className={`px-3 py-1.5 rounded-xl text-xs font-black transition-all ${
+                                            isSelected 
+                                                ? 'bg-brand-600 text-white shadow-md shadow-brand-600/20 scale-105' 
+                                                : 'bg-black/5 text-slate-600 hover:bg-black/10'
+                                        }`}
+                                    >
+                                        R$ {val}
+                                    </button>
+                                );
+                            })}
                         </div>
                     </div>
                 )}
@@ -165,11 +238,19 @@ const CashRegisterPage: React.FC = () => {
                         </div>
                     )}
                     <button 
+                        type="button"
                         onClick={handleOpenRegister} 
-                        disabled={!openingBalanceInput || parseFloat(openingBalanceInput) < 0}
-                        className="w-full py-5 bg-brand-600 text-white rounded-2xl font-black uppercase tracking-[0.2em] shadow-lg shadow-brand-900/10 hover:bg-brand-500 transition-all duration-500 transform hover:-translate-y-1 active:scale-95 disabled:opacity-30"
+                        disabled={isOpening || (openingBalanceInput.trim() !== '' && parseFloat(openingBalanceInput) < 0)}
+                        className="w-full py-5 bg-brand-600 text-white rounded-2xl font-black uppercase tracking-[0.2em] shadow-lg shadow-brand-900/10 hover:bg-brand-500 transition-all duration-300 transform active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                     >
-                        Abrir Operação
+                        {isOpening ? (
+                            <>
+                                <Loader2 className="animate-spin w-5 h-5" />
+                                <span>Abrindo Operação...</span>
+                            </>
+                        ) : (
+                            <span>Abrir Operação</span>
+                        )}
                     </button>
                 </div>
             </div>

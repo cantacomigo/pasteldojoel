@@ -50,14 +50,25 @@ export const StorageService = {
 
   // ─── Orders ──────────────────────────────────────────────────────────
 
+  getDeletedOrderIds: (): Set<string> => {
+    try {
+      const list = JSON.parse(localStorage.getItem('pastelaria_deleted_orders') || '[]');
+      return new Set(Array.isArray(list) ? list : []);
+    } catch {
+      return new Set();
+    }
+  },
+
   getOrders: async (): Promise<Order[]> => {
     let localOrders: Order[] = [];
+    const deletedIds = StorageService.getDeletedOrderIds();
+
     try {
       const stored = localStorage.getItem(LS_KEYS.ORDERS);
       if (stored) {
         const parsed = JSON.parse(stored);
         if (Array.isArray(parsed)) {
-          localOrders = parsed.filter(o => o && typeof o === 'object' && o.id);
+          localOrders = parsed.filter(o => o && typeof o === 'object' && o.id && !deletedIds.has(o.id));
         }
       }
     } catch (e) {
@@ -78,6 +89,7 @@ export const StorageService = {
         if (!querySnapshot.empty) {
           const firestoreOrders: Order[] = [];
           querySnapshot.forEach(docSnap => {
+            if (deletedIds.has(docSnap.id)) return;
             const data = docSnap.data() as any;
             firestoreOrders.push({
               id: docSnap.id,
@@ -108,7 +120,7 @@ export const StorageService = {
           firestoreOrders.forEach(o => syncedMap.set(o.id, o));
           const currentLocal: Order[] = JSON.parse(localStorage.getItem(LS_KEYS.ORDERS) || '[]');
           currentLocal.forEach(o => {
-            if (o.syncStatus === 'pending' && !syncedMap.has(o.id)) {
+            if (o && o.id && !deletedIds.has(o.id) && o.syncStatus === 'pending' && !syncedMap.has(o.id)) {
               syncedMap.set(o.id, o);
             }
           });
@@ -143,8 +155,11 @@ export const StorageService = {
   },
 
   getOrderById: async (id: string): Promise<Order | null> => {
+    const deletedIds = StorageService.getDeletedOrderIds();
+    if (deletedIds.has(id)) return null;
+
     const orders = await StorageService.getOrders();
-    const found = orders.find(o => o.id === id);
+    const found = orders.find(o => o.id === id && !deletedIds.has(o.id));
     if (found) return found;
 
     if (isFirebaseConfigured() && db) {
@@ -213,11 +228,17 @@ export const StorageService = {
 
       if (fiadoAmount > 0) {
         const customers = await StorageService.getCustomers();
-        const customer = customers.find(c => c.name.toLowerCase() === updatedOrder.customerName.toLowerCase());
+        const customer = customers.find(c => 
+          (updatedOrder.customerId && c.id === updatedOrder.customerId) ||
+          c.name.toLowerCase().trim() === updatedOrder.customerName.toLowerCase().trim()
+        );
         if (customer) {
           customer.balance = (customer.balance || 0) + fiadoAmount;
           await StorageService.saveCustomer(customer);
           updatedOrder.fiadoAccounted = true;
+          if (!updatedOrder.customerId) {
+            updatedOrder.customerId = customer.id;
+          }
         }
       }
     }
@@ -287,15 +308,66 @@ export const StorageService = {
   },
 
   deleteOrder: async (id: string): Promise<void> => {
-    const orders: Order[] = JSON.parse(localStorage.getItem(LS_KEYS.ORDERS) || '[]');
-    const targetOrder = orders.find(o => o.id === id);
+    let orders: Order[] = [];
+    try {
+      orders = JSON.parse(localStorage.getItem(LS_KEYS.ORDERS) || '[]');
+    } catch {
+      orders = [];
+    }
+    const targetOrder = orders.find(o => o && o.id === id);
+
+    // 1. Se o pedido decrementou estoque e não estava cancelado, restaura estoque
     if (targetOrder && targetOrder.status !== OrderStatus.CANCELLED && targetOrder.stockDecremented) {
-      await StorageService.restoreOrderStock(targetOrder);
+      try {
+        await StorageService.restoreOrderStock(targetOrder);
+      } catch (err) {
+        console.warn("Erro ao restaurar estoque ao excluir pedido:", err);
+      }
     }
 
-    const filtered = orders.filter(o => o.id !== id);
+    // 2. Se o pedido tinha fiado contabilizado no cliente mensalista, estorna o saldo
+    if (targetOrder && targetOrder.fiadoAccounted) {
+      try {
+        let fiadoAmount = 0;
+        if (targetOrder.payments && targetOrder.payments.length > 0) {
+          fiadoAmount = targetOrder.payments
+            .filter(p => p.method === PaymentMethod.FIADO)
+            .reduce((sum, p) => sum + p.amount, 0);
+        } else if (targetOrder.paymentMethod === PaymentMethod.FIADO) {
+          fiadoAmount = targetOrder.total || 0;
+        }
+
+        if (fiadoAmount > 0) {
+          const customers = await StorageService.getCustomers();
+          const customer = customers.find(c => 
+            (targetOrder.customerId && c.id === targetOrder.customerId) ||
+            c.name.toLowerCase().trim() === (targetOrder.customerName || '').toLowerCase().trim()
+          );
+          if (customer) {
+            customer.balance = Math.max(0, (customer.balance || 0) - fiadoAmount);
+            await StorageService.saveCustomer(customer);
+          }
+        }
+      } catch (err) {
+        console.warn("Erro ao estornar fiado do cliente mensalista ao excluir:", err);
+      }
+    }
+
+    // 3. Remove do LocalStorage
+    const filtered = orders.filter(o => o && o.id !== id);
     localStorage.setItem(LS_KEYS.ORDERS, JSON.stringify(filtered));
 
+    // 4. Grava na lista de IDs excluídos (tombstone) para evitar ressurreição em snapshots do Firestore
+    try {
+      const deletedIds: string[] = JSON.parse(localStorage.getItem('pastelaria_deleted_orders') || '[]');
+      if (!deletedIds.includes(id)) {
+        deletedIds.push(id);
+        if (deletedIds.length > 500) deletedIds.shift();
+        localStorage.setItem('pastelaria_deleted_orders', JSON.stringify(deletedIds));
+      }
+    } catch {}
+
+    // 5. Exclui do Firestore se configurado
     if (isFirebaseConfigured() && db && navigator.onLine) {
       try {
         await deleteDoc(doc(db, 'orders', id));
@@ -303,6 +375,12 @@ export const StorageService = {
         console.warn("Falha ao deletar pedido no Firebase:", e);
       }
     }
+
+    // 6. Notifica todas as páginas e abas abertas
+    try {
+      window.dispatchEvent(new CustomEvent('orders-changed'));
+      window.dispatchEvent(new CustomEvent('order-deleted', { detail: { id } }));
+    } catch {}
   },
 
   // ─── Menu & Products ──────────────────────────────────────────────────
@@ -719,7 +797,7 @@ export const StorageService = {
 
   getCustomers: async (): Promise<MonthlyCustomer[]> => {
     const stored = localStorage.getItem(LS_KEYS.CUSTOMERS);
-    let localCustomers = stored ? JSON.parse(stored) : [];
+    let localCustomers: MonthlyCustomer[] = stored ? JSON.parse(stored) : [];
 
     if (isFirebaseConfigured() && db && navigator.onLine) {
       getDocs(collection(db, 'monthly_customers')).then(snapshot => {
@@ -731,12 +809,18 @@ export const StorageService = {
               id: docSnap.id,
               name: data.name,
               phone: data.phone || '',
+              company: data.company || '',
+              notes: data.notes || '',
+              creditLimit: typeof data.creditLimit === 'number' ? data.creditLimit : undefined,
               balance: Number(data.balance || 0),
+              payments: Array.isArray(data.payments) ? data.payments : [],
+              createdAt: data.createdAt || Date.now(),
               syncStatus: 'synced',
               updatedAt: data.updatedAt || Date.now()
             });
           });
           localStorage.setItem(LS_KEYS.CUSTOMERS, JSON.stringify(remote));
+          window.dispatchEvent(new CustomEvent('customers-changed'));
         }
       }).catch(() => {});
     }
@@ -745,24 +829,38 @@ export const StorageService = {
   },
 
   saveCustomer: async (customer: MonthlyCustomer): Promise<MonthlyCustomer> => {
-    const updated: MonthlyCustomer = { ...customer, syncStatus: 'pending', updatedAt: Date.now() };
+    const updated: MonthlyCustomer = { 
+      ...customer, 
+      createdAt: customer.createdAt || Date.now(),
+      syncStatus: 'pending', 
+      updatedAt: Date.now() 
+    };
     const customers: MonthlyCustomer[] = JSON.parse(localStorage.getItem(LS_KEYS.CUSTOMERS) || '[]');
     const idx = customers.findIndex(c => c.id === customer.id);
     if (idx >= 0) customers[idx] = updated;
     else customers.push(updated);
     localStorage.setItem(LS_KEYS.CUSTOMERS, JSON.stringify(customers));
+    window.dispatchEvent(new CustomEvent('customers-changed', { detail: updated }));
 
     if (isFirebaseConfigured() && db && navigator.onLine) {
-      try {
-        await setDoc(doc(db, 'monthly_customers', customer.id), {
-          id: customer.id,
-          name: customer.name,
-          phone: customer.phone || '',
-          balance: Number(customer.balance || 0),
-          updatedAt: Date.now()
-        }, { merge: true });
+      setDoc(doc(db, 'monthly_customers', customer.id), {
+        id: customer.id,
+        name: customer.name,
+        phone: customer.phone || '',
+        company: customer.company || '',
+        notes: customer.notes || '',
+        creditLimit: customer.creditLimit !== undefined ? customer.creditLimit : null,
+        balance: Number(customer.balance || 0),
+        payments: customer.payments || [],
+        createdAt: updated.createdAt,
+        updatedAt: Date.now()
+      }, { merge: true })
+      .then(() => {
         updated.syncStatus = 'synced';
-      } catch (e) {}
+      })
+      .catch((e) => {
+        console.warn("Erro ao sincronizar mensalista com Firebase:", e);
+      });
     }
     return updated;
   },
@@ -771,11 +869,10 @@ export const StorageService = {
     const customers: MonthlyCustomer[] = JSON.parse(localStorage.getItem(LS_KEYS.CUSTOMERS) || '[]');
     const filtered = customers.filter(c => c.id !== id);
     localStorage.setItem(LS_KEYS.CUSTOMERS, JSON.stringify(filtered));
+    window.dispatchEvent(new CustomEvent('customers-changed', { detail: { id, deleted: true } }));
 
     if (isFirebaseConfigured() && db && navigator.onLine) {
-      try {
-        await deleteDoc(doc(db, 'monthly_customers', id));
-      } catch (e) {}
+      deleteDoc(doc(db, 'monthly_customers', id)).catch(() => {});
     }
   },
 
@@ -821,7 +918,7 @@ export const StorageService = {
     const session: CashRegisterSession = {
       id: StorageService.generateId(),
       openedAt: Date.now(),
-      openingBalance: openingBalance || 0,
+      openingBalance: typeof openingBalance === 'number' && !isNaN(openingBalance) ? openingBalance : 0,
       openingBreakdown,
       status: 'OPEN',
       transactions: [],
@@ -832,22 +929,24 @@ export const StorageService = {
     const sessions = JSON.parse(localStorage.getItem(LS_KEYS.CASH_SESSIONS) || '[]');
     sessions.push(session);
     localStorage.setItem(LS_KEYS.CASH_SESSIONS, JSON.stringify(sessions));
+    window.dispatchEvent(new CustomEvent('cash-session-changed', { detail: session }));
 
     if (isFirebaseConfigured() && db && navigator.onLine) {
-      try {
-        await setDoc(doc(db, 'cash_sessions', session.id), {
-          id: session.id,
-          openedAt: session.openedAt,
-          openingBalance: session.openingBalance,
-          openingBreakdown: session.openingBreakdown || null,
-          status: session.status,
-          transactions: [],
-          updatedAt: Date.now()
-        });
+      setDoc(doc(db, 'cash_sessions', session.id), {
+        id: session.id,
+        openedAt: session.openedAt,
+        openingBalance: session.openingBalance,
+        openingBreakdown: session.openingBreakdown || null,
+        status: session.status,
+        transactions: [],
+        updatedAt: Date.now()
+      })
+      .then(() => {
         session.syncStatus = 'synced';
-      } catch (e) {
+      })
+      .catch((e) => {
         console.warn("Erro ao abrir sessão de caixa no Firebase:", e);
-      }
+      });
     }
 
     return session;
@@ -870,21 +969,24 @@ export const StorageService = {
       sessions[index].updatedAt = Date.now();
       localStorage.setItem(LS_KEYS.CASH_SESSIONS, JSON.stringify(sessions));
     }
+    window.dispatchEvent(new CustomEvent('cash-session-changed'));
 
     if (isFirebaseConfigured() && db && navigator.onLine) {
-      try {
-        const sessionRef = doc(db, 'cash_sessions', sessionId);
-        const sessionSnap = await getDoc(sessionRef);
-        const existingTrans = sessionSnap.exists() && Array.isArray(sessionSnap.data().transactions) 
-          ? sessionSnap.data().transactions 
-          : [];
-        await updateDoc(sessionRef, {
-          transactions: [...existingTrans, newTransaction],
-          updatedAt: Date.now()
-        });
-      } catch (e) {
-        console.warn("Erro ao registrar transação no Firebase:", e);
-      }
+      (async () => {
+        try {
+          const sessionRef = doc(db, 'cash_sessions', sessionId);
+          const sessionSnap = await getDoc(sessionRef);
+          const existingTrans = sessionSnap.exists() && Array.isArray(sessionSnap.data().transactions) 
+            ? sessionSnap.data().transactions 
+            : [];
+          await updateDoc(sessionRef, {
+            transactions: [...existingTrans, newTransaction],
+            updatedAt: Date.now()
+          });
+        } catch (e) {
+          console.warn("Erro ao registrar transação no Firebase:", e);
+        }
+      })();
     }
 
     return newTransaction;
@@ -917,22 +1019,22 @@ export const StorageService = {
     if (index >= 0) sessions[index] = sessionData;
     else sessions.push(sessionData);
     localStorage.setItem(LS_KEYS.CASH_SESSIONS, JSON.stringify(sessions));
+    window.dispatchEvent(new CustomEvent('cash-session-changed', { detail: sessionData }));
 
     if (isFirebaseConfigured() && db && navigator.onLine) {
-      try {
-        await setDoc(doc(db, 'cash_sessions', sessionId), {
-          id: sessionId,
-          status: 'CLOSED',
-          closedAt,
-          closingBalance,
-          calculatedBalance,
-          closingBreakdown: closingBreakdown || null,
-          salesTotals: salesTotals || null,
-          updatedAt: closedAt
-        }, { merge: true });
-      } catch (e) {
+      setDoc(doc(db, 'cash_sessions', sessionId), {
+        id: sessionId,
+        status: 'CLOSED',
+        closedAt,
+        closingBalance,
+        calculatedBalance,
+        closingBreakdown: closingBreakdown || null,
+        salesTotals: salesTotals || null,
+        updatedAt: closedAt
+      }, { merge: true })
+      .catch((e) => {
         console.warn("Erro ao fechar sessão no Firebase:", e);
-      }
+      });
     }
 
     return sessionData;

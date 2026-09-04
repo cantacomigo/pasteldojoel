@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { CheckCircle, Printer, RotateCcw, Save, Tag, MinusCircle } from 'lucide-react';
+import { CheckCircle, Printer, RotateCcw, Save, Tag, MinusCircle, Trash2 } from 'lucide-react';
 import { Order, OrderStatus } from '@/types';
 
 interface OrderSummaryAndActionsProps {
@@ -118,9 +118,10 @@ const OrderSummaryAndActions: React.FC<OrderSummaryAndActionsProps> = ({
 
         <button 
             onClick={onDelete} 
-            className="w-full py-4 text-slate-500 hover:text-red-600 text-[9px] font-black uppercase tracking-[0.4em] transition-all hover:bg-red-500/5 rounded-xl border border-transparent hover:border-red-500/10"
+            className="w-full py-3.5 px-4 bg-red-50 hover:bg-red-100 text-red-600 hover:text-red-700 rounded-xl text-[10px] font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all border border-red-200/70 active:scale-[0.98]"
         >
-            Descartar Registro
+            <Trash2 size={16} />
+            Excluir Comanda
         </button>
       </div>
     </div>

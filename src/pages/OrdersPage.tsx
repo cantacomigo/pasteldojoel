@@ -6,8 +6,9 @@ import { StorageService } from '@/services/storageService';
 import { useAuth } from '@/components/AuthProvider';
 import { subscribeToCollection } from '@/integrations/firebase/config';
 import { useSync } from '@/hooks/useSync';
-import { Cloud, CloudOff, RefreshCw, Plus, User, Clock, Search, ChevronRight, Loader2, UserCheck, WifiOff } from 'lucide-react';
+import { Cloud, CloudOff, RefreshCw, Plus, User, Clock, Search, ChevronRight, Loader2, UserCheck, WifiOff, Trash2 } from 'lucide-react';
 import { Order, OrderStatus, OrderType } from '@/types';
+import ConfirmationModal from '@/components/modals/ConfirmationModal';
 
 const OrdersPage: React.FC = () => {
   const navigate = useNavigate();
@@ -34,6 +35,10 @@ const OrdersPage: React.FC = () => {
   const [newCustomerName, setNewCustomerName] = useState('');
   const [newOrderType, setNewOrderType] = useState<OrderType>(OrderType.DINE_IN);
 
+  const [orderToDelete, setOrderToDelete] = useState<Order | null>(null);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+
   useEffect(() => {
     loadOrders(true);
     checkCashStatus();
@@ -54,9 +59,19 @@ const OrdersPage: React.FC = () => {
       checkCashStatus();
     });
 
+    const handleCashChanged = () => checkCashStatus();
+    const handleOrdersChanged = () => loadOrders(true);
+
+    window.addEventListener('cash-session-changed', handleCashChanged);
+    window.addEventListener('orders-changed', handleOrdersChanged);
+    window.addEventListener('order-deleted', handleOrdersChanged);
+
     return () => {
       unsubOrders();
       unsubCash();
+      window.removeEventListener('cash-session-changed', handleCashChanged);
+      window.removeEventListener('orders-changed', handleOrdersChanged);
+      window.removeEventListener('order-deleted', handleOrdersChanged);
     };
   }, []);
 
@@ -94,6 +109,22 @@ const OrdersPage: React.FC = () => {
       return;
     }
     setIsModalOpen(true);
+  };
+
+  const handleDeleteOrder = async () => {
+    if (!orderToDelete || isDeleting) return;
+    try {
+      setIsDeleting(true);
+      await StorageService.deleteOrder(orderToDelete.id);
+      setOrders(prev => prev.filter(o => o.id !== orderToDelete.id));
+      setIsDeleteModalOpen(false);
+      setOrderToDelete(null);
+    } catch (err) {
+      console.error("Erro ao excluir comanda:", err);
+      alert("Erro ao excluir comanda. Tente novamente.");
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   const handleCreateOrder = async () => {
@@ -238,6 +269,18 @@ const OrdersPage: React.FC = () => {
                         </h3>
                         <p className="text-[10px] text-slate-500 font-bold tracking-[0.2em] uppercase mb-3">{order.id.slice(0,5)}</p>
                     </div>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setOrderToDelete(order);
+                        setIsDeleteModalOpen(true);
+                      }}
+                      className="p-2 text-slate-300 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all shrink-0 -mr-1 -mt-1 z-20"
+                      title="Excluir comanda"
+                    >
+                      <Trash2 size={16} />
+                    </button>
                 </div>
                 
                 <div className="flex flex-wrap items-center gap-2">
@@ -335,6 +378,16 @@ const OrdersPage: React.FC = () => {
           </div>
         </div>
       )}
+
+      <ConfirmationModal 
+        isOpen={isDeleteModalOpen}
+        title="Excluir Comanda"
+        message={`Tem certeza que deseja excluir permanentemente a comanda ${orderToDelete?.customerName ? `"${orderToDelete.customerName.replace(/^X\s*/i, '')}"` : ''}? Esta ação não pode ser desfeita.`}
+        isDestructive={true}
+        isLoading={isDeleting}
+        onConfirm={handleDeleteOrder}
+        onCancel={() => !isDeleting && setIsDeleteModalOpen(false)}
+      />
     </div>
   );
 };

@@ -121,6 +121,7 @@ export interface Order {
   orderType?: OrderType;
   createdBy?: string;   // UUID do vendedor que abriu a comanda
   sellerName?: string;  // Nome do vendedor (desnormalizado para exibição)
+  customerId?: string;  // ID do mensalista vinculado (se houver fiado)
   stockDecremented?: boolean;
   fiadoAccounted?: boolean;
   syncStatus?: 'pending' | 'synced' | 'deleted';
@@ -168,11 +169,24 @@ export interface CashRegisterSession {
   updatedAt?: number;
 }
 
+export interface CustomerPaymentRecord {
+  id: string;
+  date: number;
+  amount: number;
+  method: PaymentMethod;
+  notes?: string;
+}
+
 export interface MonthlyCustomer {
   id: string;
   name: string;
   phone?: string;
+  company?: string;
+  notes?: string;
+  creditLimit?: number;
   balance: number;
+  payments?: CustomerPaymentRecord[];
+  createdAt?: number;
   syncStatus?: 'pending' | 'synced' | 'deleted';
   updatedAt?: number;
 }
