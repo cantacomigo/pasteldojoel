@@ -15,10 +15,19 @@ const OrdersPage: React.FC = () => {
   const { profile } = useAuth();
   const { isOnline, isSyncing } = useSync();
   const isAdmin = profile?.role === 'admin';
-  const [orders, setOrders] = useState<Order[]>([]);
+  const [orders, setOrders] = useState<Order[]>(() => {
+    try {
+      const stored = localStorage.getItem('pastelaria_orders');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return [];
+  });
   const [filter, setFilter] = useState<OrderStatus | 'ALL'>(OrderStatus.OPEN);
   const [searchTerm, setSearchTerm] = useState('');
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
 
   const [isCashOpen, setIsCashOpen] = useState<boolean>(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -26,7 +35,7 @@ const OrdersPage: React.FC = () => {
   const [newOrderType, setNewOrderType] = useState<OrderType>(OrderType.DINE_IN);
 
   useEffect(() => {
-    loadOrders();
+    loadOrders(true);
     checkCashStatus();
 
     // Abrir modal automaticamente se vier de um encerramento
@@ -57,15 +66,15 @@ const OrdersPage: React.FC = () => {
   };
 
   const loadOrders = async (silent = false) => {
-      if (!silent) setIsLoading(true);
-      try {
-        const allOrders = await StorageService.getOrders();
-        setOrders([...allOrders].sort((a, b) => b.createdAt - a.createdAt));
-      } catch (error) {
-        console.error("Erro ao carregar comandas:", error);
-      } finally {
-        if (!silent) setIsLoading(false);
-      }
+    if (!silent && orders.length === 0) setIsLoading(true);
+    try {
+      const allOrders = await StorageService.getOrders();
+      setOrders([...allOrders].sort((a, b) => b.createdAt - a.createdAt));
+    } catch (error) {
+      console.error("Erro ao carregar comandas:", error);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const filteredOrders = orders.filter((order) => {
@@ -125,8 +134,6 @@ const OrdersPage: React.FC = () => {
     const hours = Math.floor(diff / 60);
     return `${hours}h ${diff % 60}m`;
   };
-
-  if (isLoading) return <div className="p-10 flex justify-center text-brand-500 h-full items-center"><Loader2 className="animate-spin w-10 h-10" /></div>;
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300 max-w-7xl mx-auto pb-10">
@@ -194,7 +201,18 @@ const OrdersPage: React.FC = () => {
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 lg:gap-6">
-        {filteredOrders.map((order) => {
+        {isLoading && filteredOrders.length === 0 ? (
+          <div className="col-span-full py-20 flex flex-col items-center justify-center text-slate-400 gap-3">
+            <Loader2 className="animate-spin w-8 h-8 text-brand-500" />
+            <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Carregando comandas...</p>
+          </div>
+        ) : filteredOrders.length === 0 ? (
+          <div className="col-span-full py-16 flex flex-col items-center justify-center text-slate-400 gap-3 glass-card rounded-[2rem] border-dashed border border-black/10 text-center px-4">
+            <p className="text-sm font-bold text-slate-700 uppercase tracking-wider font-display">Nenhuma comanda encontrada</p>
+            <p className="text-xs text-slate-400 font-medium max-w-xs">Clique no botão "+ Nova Comanda" acima para iniciar o primeiro atendimento.</p>
+          </div>
+        ) : (
+          filteredOrders.map((order) => {
           const isOpen = order.status === OrderStatus.OPEN;
           const items = order.items || [];
           const totalItems = items.reduce((acc: number, item: any) => acc + (item?.quantity || 0), 0);
@@ -269,7 +287,7 @@ const OrdersPage: React.FC = () => {
               </div>
             </div>
           );
-        })}
+        }))}
       </div>
 
       {isModalOpen && (

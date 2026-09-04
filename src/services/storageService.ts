@@ -65,65 +65,81 @@ export const StorageService = {
       localStorage.setItem(LS_KEYS.ORDERS, '[]');
     }
 
-    if (!isFirebaseConfigured() || !db) {
+    if (!isFirebaseConfigured() || !db || !navigator.onLine) {
       return localOrders;
     }
 
-    try {
-      const ordersRef = collection(db, 'orders');
-      const q = query(ordersRef, orderBy('createdAt', 'desc'), limit(150));
-      const querySnapshot = await getDocs(q);
+    const fetchFirestoreOrders = async (): Promise<Order[]> => {
+      try {
+        const ordersRef = collection(db, 'orders');
+        const q = query(ordersRef, orderBy('createdAt', 'desc'), limit(150));
+        const querySnapshot = await getDocs(q);
 
-      if (!querySnapshot.empty) {
-        const firestoreOrders: Order[] = [];
-        querySnapshot.forEach(docSnap => {
-          const data = docSnap.data() as any;
-          firestoreOrders.push({
-            id: docSnap.id,
-            customerName: data.customerName || 'Cliente',
-            status: data.status || OrderStatus.OPEN,
-            createdAt: data.createdAt || Date.now(),
-            closedAt: data.closedAt || null,
-            discount: Number(data.discount || 0),
-            subtotal: Number(data.subtotal || 0),
-            total: Number(data.total || 0),
-            paymentMethod: data.paymentMethod || null,
-            paymentAmountReceived: data.paymentAmountReceived ? Number(data.paymentAmountReceived) : null,
-            change: data.change ? Number(data.change) : null,
-            orderType: data.orderType as OrderType | undefined,
-            createdBy: data.createdBy || null,
-            sellerName: data.sellerName || null,
-            stockDecremented: !!data.stockDecremented,
-            fiadoAccounted: !!data.fiadoAccounted,
-            payments: data.payments || [],
-            items: Array.isArray(data.items) ? data.items : [],
-            syncStatus: 'synced',
-            updatedAt: data.updatedAt || Date.now()
+        if (!querySnapshot.empty) {
+          const firestoreOrders: Order[] = [];
+          querySnapshot.forEach(docSnap => {
+            const data = docSnap.data() as any;
+            firestoreOrders.push({
+              id: docSnap.id,
+              customerName: data.customerName || 'Cliente',
+              status: data.status || OrderStatus.OPEN,
+              createdAt: data.createdAt || Date.now(),
+              closedAt: data.closedAt || null,
+              discount: Number(data.discount || 0),
+              subtotal: Number(data.subtotal || 0),
+              total: Number(data.total || 0),
+              paymentMethod: data.paymentMethod || null,
+              paymentAmountReceived: data.paymentAmountReceived ? Number(data.paymentAmountReceived) : null,
+              change: data.change ? Number(data.change) : null,
+              orderType: data.orderType as OrderType | undefined,
+              createdBy: data.createdBy || null,
+              sellerName: data.sellerName || null,
+              stockDecremented: !!data.stockDecremented,
+              fiadoAccounted: !!data.fiadoAccounted,
+              payments: data.payments || [],
+              items: Array.isArray(data.items) ? data.items : [],
+              syncStatus: 'synced',
+              updatedAt: data.updatedAt || Date.now()
+            });
           });
-        });
 
-        // Merge: mantemos o que temos no Firestore como mais atualizado,
-        // preservando pedidos locais que ainda não foram sincronizados
-        const syncedMap = new Map<string, Order>();
-        firestoreOrders.forEach(o => syncedMap.set(o.id, o));
-        localOrders.forEach(o => {
-          if (o.syncStatus === 'pending' && !syncedMap.has(o.id)) {
-            syncedMap.set(o.id, o);
-          }
-        });
+          // Merge com pedidos pendentes locais
+          const syncedMap = new Map<string, Order>();
+          firestoreOrders.forEach(o => syncedMap.set(o.id, o));
+          const currentLocal: Order[] = JSON.parse(localStorage.getItem(LS_KEYS.ORDERS) || '[]');
+          currentLocal.forEach(o => {
+            if (o.syncStatus === 'pending' && !syncedMap.has(o.id)) {
+              syncedMap.set(o.id, o);
+            }
+          });
 
-        const mergedOrders = Array.from(syncedMap.values()).sort(
-          (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-        );
+          const mergedOrders = Array.from(syncedMap.values()).sort(
+            (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+          );
 
-        localStorage.setItem(LS_KEYS.ORDERS, JSON.stringify(mergedOrders));
-        return mergedOrders;
+          localStorage.setItem(LS_KEYS.ORDERS, JSON.stringify(mergedOrders));
+          return mergedOrders;
+        }
+      } catch (e) {
+        console.warn("Firebase getOrders fallback/background error:", e);
       }
-    } catch (e) {
-      console.warn("Firebase getOrders fallback to local cache:", e);
+      return localOrders;
+    };
+
+    // Stale-While-Revalidate: Se já temos pedidos no cache local, retorna na hora (0ms)
+    // e executa a sincronização com o Firestore em segundo plano
+    if (localOrders.length > 0) {
+      fetchFirestoreOrders().catch(() => {});
+      return localOrders;
     }
 
-    return localOrders;
+    // Se não há pedidos locais, tenta buscar com timeout curto (1.2s) para nunca congelar a tela
+    try {
+      const timeoutPromise = new Promise<Order[]>((resolve) => setTimeout(() => resolve(localOrders), 1200));
+      return await Promise.race([fetchFirestoreOrders(), timeoutPromise]);
+    } catch {
+      return localOrders;
+    }
   },
 
   getOrderById: async (id: string): Promise<Order | null> => {
@@ -773,23 +789,28 @@ export const StorageService = {
     if (isFirebaseConfigured() && db && navigator.onLine) {
       try {
         const q = query(collection(db, 'cash_sessions'), orderBy('openedAt', 'desc'), limit(5));
-        const snapshot = await getDocs(q);
-        for (const docSnap of snapshot.docs) {
-          const data = docSnap.data() as any;
-          if (data.status === 'OPEN') {
-            const session: CashRegisterSession = {
-              id: docSnap.id,
-              openedAt: Number(data.openedAt),
-              openingBalance: Number(data.openingBalance || 0),
-              openingBreakdown: data.openingBreakdown,
-              closingBreakdown: data.closingBreakdown,
-              status: 'OPEN',
-              syncStatus: 'synced',
-              transactions: Array.isArray(data.transactions) ? data.transactions : []
-            };
-            return session;
+        const fetchPromise = getDocs(q).then(snapshot => {
+          for (const docSnap of snapshot.docs) {
+            const data = docSnap.data() as any;
+            if (data.status === 'OPEN') {
+              const session: CashRegisterSession = {
+                id: docSnap.id,
+                openedAt: Number(data.openedAt),
+                openingBalance: Number(data.openingBalance || 0),
+                openingBreakdown: data.openingBreakdown,
+                closingBreakdown: data.closingBreakdown,
+                status: 'OPEN',
+                syncStatus: 'synced',
+                transactions: Array.isArray(data.transactions) ? data.transactions : []
+              };
+              return session;
+            }
           }
-        }
+          return null;
+        });
+
+        const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 1200));
+        return await Promise.race([fetchPromise, timeoutPromise]);
       } catch (e) {}
     }
 
