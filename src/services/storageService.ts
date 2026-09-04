@@ -17,7 +17,7 @@ import {
 import { 
   Order, MenuItem, CategoryItem, Addon, Filling, MenuItemFilling, CashRegisterSession, 
   DEFAULT_CATEGORIES, OrderStatus, PaymentMethod, CashTransaction, CashTransactionType, OrderType, CashBreakdown,
-  UserProfile, MonthlyCustomer
+  UserProfile, MonthlyCustomer, CustomerFiadoOrder
 } from '@/types';
 import { 
   DEFAULT_INITIAL_PRODUCTS, 
@@ -215,31 +215,70 @@ export const StorageService = {
       updatedOrder.stockDecremented = false;
     }
 
-    // 2. Fiado (Mensalista)
-    if (updatedOrder.status === OrderStatus.CLOSED && !updatedOrder.fiadoAccounted) {
-      let fiadoAmount = 0;
-      if (updatedOrder.payments && updatedOrder.payments.length > 0) {
-        fiadoAmount = updatedOrder.payments
-          .filter(p => p.method === PaymentMethod.FIADO)
-          .reduce((sum, p) => sum + p.amount, 0);
-      } else if (updatedOrder.paymentMethod === PaymentMethod.FIADO) {
-        fiadoAmount = updatedOrder.total;
-      }
+    // 2. Fiado (Mensalista) - Guarda a comanda com itens junto ao registro do cliente
+    let fiadoAmount = 0;
+    if (updatedOrder.payments && updatedOrder.payments.length > 0) {
+      fiadoAmount = updatedOrder.payments
+        .filter(p => p.method === PaymentMethod.FIADO)
+        .reduce((sum, p) => sum + p.amount, 0);
+    } else if (updatedOrder.paymentMethod === PaymentMethod.FIADO) {
+      fiadoAmount = updatedOrder.total;
+    }
 
-      if (fiadoAmount > 0) {
-        const customers = await StorageService.getCustomers();
-        const customer = customers.find(c => 
-          (updatedOrder.customerId && c.id === updatedOrder.customerId) ||
-          c.name.toLowerCase().trim() === updatedOrder.customerName.toLowerCase().trim()
-        );
-        if (customer) {
-          customer.balance = (customer.balance || 0) + fiadoAmount;
-          await StorageService.saveCustomer(customer);
-          updatedOrder.fiadoAccounted = true;
-          if (!updatedOrder.customerId) {
-            updatedOrder.customerId = customer.id;
-          }
+    if (updatedOrder.status === OrderStatus.CLOSED && fiadoAmount > 0) {
+      const customers = await StorageService.getCustomers();
+      const customer = customers.find(c => 
+        (updatedOrder.customerId && c.id === updatedOrder.customerId) ||
+        c.name.toLowerCase().trim() === updatedOrder.customerName.toLowerCase().trim()
+      );
+
+      if (customer) {
+        // Monta o registro completo da comanda para futuro conferimento e controle
+        const fiadoRecord: CustomerFiadoOrder = {
+          orderId: updatedOrder.id,
+          customerName: updatedOrder.customerName,
+          createdAt: updatedOrder.createdAt,
+          closedAt: updatedOrder.closedAt || Date.now(),
+          total: updatedOrder.total,
+          fiadoAmount: fiadoAmount,
+          paymentMethod: updatedOrder.paymentMethod,
+          payments: updatedOrder.payments || [],
+          sellerName: updatedOrder.sellerName,
+          orderType: updatedOrder.orderType,
+          items: (updatedOrder.items || []).map(i => ({
+            id: i.id,
+            menuItemId: i.menuItemId,
+            name: i.name,
+            category: i.category,
+            price: i.price,
+            quantity: i.quantity,
+            notes: i.notes || '',
+            extra: i.extra || 0,
+            discount: i.discount || 0,
+            fillingId: i.fillingId,
+            addons: i.addons || []
+          }))
+        };
+
+        const existingFiadoOrders = Array.isArray(customer.fiadoOrders) ? [...customer.fiadoOrders] : [];
+        const orderIdx = existingFiadoOrders.findIndex(fo => fo.orderId === updatedOrder.id);
+        if (orderIdx >= 0) {
+          existingFiadoOrders[orderIdx] = fiadoRecord;
+        } else {
+          existingFiadoOrders.unshift(fiadoRecord);
         }
+        customer.fiadoOrders = existingFiadoOrders;
+
+        if (!updatedOrder.fiadoAccounted) {
+          customer.balance = (customer.balance || 0) + fiadoAmount;
+          updatedOrder.fiadoAccounted = true;
+        }
+
+        if (!updatedOrder.customerId) {
+          updatedOrder.customerId = customer.id;
+        }
+
+        await StorageService.saveCustomer(customer);
       }
     }
 
@@ -345,6 +384,9 @@ export const StorageService = {
           );
           if (customer) {
             customer.balance = Math.max(0, (customer.balance || 0) - fiadoAmount);
+            if (customer.fiadoOrders) {
+              customer.fiadoOrders = customer.fiadoOrders.filter(fo => fo.orderId !== id);
+            }
             await StorageService.saveCustomer(customer);
           }
         }
@@ -814,6 +856,7 @@ export const StorageService = {
               creditLimit: typeof data.creditLimit === 'number' ? data.creditLimit : undefined,
               balance: Number(data.balance || 0),
               payments: Array.isArray(data.payments) ? data.payments : [],
+              fiadoOrders: Array.isArray(data.fiadoOrders) ? data.fiadoOrders : [],
               createdAt: data.createdAt || Date.now(),
               syncStatus: 'synced',
               updatedAt: data.updatedAt || Date.now()
@@ -831,6 +874,7 @@ export const StorageService = {
   saveCustomer: async (customer: MonthlyCustomer): Promise<MonthlyCustomer> => {
     const updated: MonthlyCustomer = { 
       ...customer, 
+      fiadoOrders: Array.isArray(customer.fiadoOrders) ? customer.fiadoOrders : [],
       createdAt: customer.createdAt || Date.now(),
       syncStatus: 'pending', 
       updatedAt: Date.now() 
@@ -843,6 +887,31 @@ export const StorageService = {
     window.dispatchEvent(new CustomEvent('customers-changed', { detail: updated }));
 
     if (isFirebaseConfigured() && db && navigator.onLine) {
+      const sanitizedFiadoOrders = (updated.fiadoOrders || []).map(fo => ({
+        orderId: fo.orderId,
+        customerName: fo.customerName || '',
+        createdAt: fo.createdAt || Date.now(),
+        closedAt: fo.closedAt || null,
+        total: Number(fo.total || 0),
+        fiadoAmount: Number(fo.fiadoAmount || 0),
+        paymentMethod: fo.paymentMethod || null,
+        sellerName: fo.sellerName || null,
+        orderType: fo.orderType || null,
+        items: (fo.items || []).map(i => ({
+          id: i.id,
+          menuItemId: i.menuItemId,
+          name: i.name,
+          category: i.category || '',
+          price: Number(i.price || 0),
+          quantity: Number(i.quantity || 1),
+          notes: i.notes || '',
+          extra: Number(i.extra || 0),
+          discount: Number(i.discount || 0),
+          fillingId: i.fillingId || null,
+          addons: i.addons || []
+        }))
+      }));
+
       setDoc(doc(db, 'monthly_customers', customer.id), {
         id: customer.id,
         name: customer.name,
@@ -852,6 +921,7 @@ export const StorageService = {
         creditLimit: customer.creditLimit !== undefined ? customer.creditLimit : null,
         balance: Number(customer.balance || 0),
         payments: customer.payments || [],
+        fiadoOrders: sanitizedFiadoOrders,
         createdAt: updated.createdAt,
         updatedAt: Date.now()
       }, { merge: true })
@@ -863,6 +933,74 @@ export const StorageService = {
       });
     }
     return updated;
+  },
+
+  syncAllFiadoOrdersToCustomers: async (): Promise<void> => {
+    try {
+      const orders: Order[] = JSON.parse(localStorage.getItem(LS_KEYS.ORDERS) || '[]');
+      const customers = await StorageService.getCustomers();
+      if (customers.length === 0 || orders.length === 0) return;
+
+      let hasChanges = false;
+
+      for (const order of orders) {
+        let fiadoAmount = 0;
+        if (order.payments && order.payments.length > 0) {
+          fiadoAmount = order.payments
+            .filter(p => p.method === PaymentMethod.FIADO)
+            .reduce((sum, p) => sum + p.amount, 0);
+        } else if (order.paymentMethod === PaymentMethod.FIADO) {
+          fiadoAmount = order.total || 0;
+        }
+
+        if (fiadoAmount > 0 && order.status === OrderStatus.CLOSED) {
+          const customer = customers.find(c =>
+            (order.customerId && c.id === order.customerId) ||
+            c.name.toLowerCase().trim() === (order.customerName || '').toLowerCase().trim()
+          );
+
+          if (customer) {
+            customer.fiadoOrders = customer.fiadoOrders || [];
+            const exists = customer.fiadoOrders.some(fo => fo.orderId === order.id);
+            if (!exists) {
+              customer.fiadoOrders.unshift({
+                orderId: order.id,
+                customerName: order.customerName,
+                createdAt: order.createdAt,
+                closedAt: order.closedAt || Date.now(),
+                total: order.total,
+                fiadoAmount: fiadoAmount,
+                paymentMethod: order.paymentMethod,
+                payments: order.payments || [],
+                sellerName: order.sellerName,
+                orderType: order.orderType,
+                items: (order.items || []).map(i => ({
+                  id: i.id,
+                  menuItemId: i.menuItemId,
+                  name: i.name,
+                  category: i.category,
+                  price: i.price,
+                  quantity: i.quantity,
+                  notes: i.notes || '',
+                  extra: i.extra || 0,
+                  discount: i.discount || 0,
+                  fillingId: i.fillingId,
+                  addons: i.addons || []
+                }))
+              });
+              await StorageService.saveCustomer(customer);
+              hasChanges = true;
+            }
+          }
+        }
+      }
+
+      if (hasChanges) {
+        window.dispatchEvent(new CustomEvent('customers-changed'));
+      }
+    } catch (err) {
+      console.warn("Erro ao sincronizar comandas de fiado com mensalistas:", err);
+    }
   },
 
   deleteCustomer: async (id: string): Promise<void> => {

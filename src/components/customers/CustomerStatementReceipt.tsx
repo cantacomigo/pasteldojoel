@@ -1,14 +1,15 @@
 "use client";
 
 import React from 'react';
-import { MonthlyCustomer, Order, CustomerPaymentRecord } from '@/types';
+import { MonthlyCustomer, Order, CustomerPaymentRecord, CustomerFiadoOrder, OrderType } from '@/types';
 
 interface CustomerStatementReceiptProps {
   customer: MonthlyCustomer;
   orders: Order[];
   payments: CustomerPaymentRecord[];
-  type?: 'STATEMENT' | 'PAYMENT_RECEIPT';
+  type?: 'STATEMENT' | 'PAYMENT_RECEIPT' | 'FIADO_ORDER_RECEIPT';
   latestPayment?: CustomerPaymentRecord;
+  selectedFiadoOrder?: CustomerFiadoOrder | Order;
 }
 
 const CustomerStatementReceipt: React.FC<CustomerStatementReceiptProps> = ({
@@ -16,7 +17,8 @@ const CustomerStatementReceipt: React.FC<CustomerStatementReceiptProps> = ({
   orders,
   payments,
   type = 'STATEMENT',
-  latestPayment
+  latestPayment,
+  selectedFiadoOrder
 }) => {
   const now = new Date();
   const dateStr = now.toLocaleDateString('pt-BR');
@@ -36,7 +38,11 @@ const CustomerStatementReceipt: React.FC<CustomerStatementReceiptProps> = ({
         <h2 className="text-xl font-bold uppercase tracking-wider">Pastelaria do Joel</h2>
         <p className="text-xs text-gray-700">Controle de Mensalistas / Fiado</p>
         <p className="text-xs font-bold mt-1">
-          {type === 'PAYMENT_RECEIPT' ? 'COMPROVANTE DE PAGAMENTO' : 'EXTRATO DE CONTA CORRENTE'}
+          {type === 'PAYMENT_RECEIPT' 
+            ? 'COMPROVANTE DE PAGAMENTO' 
+            : type === 'FIADO_ORDER_RECEIPT'
+            ? 'COMPROVANTE DE COMANDA FIADO'
+            : 'EXTRATO DE CONTA CORRENTE'}
         </p>
       </div>
 
@@ -63,7 +69,76 @@ const CustomerStatementReceipt: React.FC<CustomerStatementReceiptProps> = ({
         </div>
       </div>
 
-      {type === 'PAYMENT_RECEIPT' && latestPayment ? (
+      {type === 'FIADO_ORDER_RECEIPT' && selectedFiadoOrder ? (
+        <div className="my-2 py-1 space-y-2">
+          <div className="bg-gray-100 p-1.5 rounded text-xs space-y-1">
+            <div className="flex justify-between font-bold">
+              <span>COMANDA:</span>
+              <span>#{('orderId' in selectedFiadoOrder ? selectedFiadoOrder.orderId : selectedFiadoOrder.id).slice(0, 6).toUpperCase()}</span>
+            </div>
+            <div className="flex justify-between text-[11px]">
+              <span>DATA DO PEDIDO:</span>
+              <span>
+                {new Date(selectedFiadoOrder.createdAt).toLocaleDateString('pt-BR')} às {new Date(selectedFiadoOrder.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+              </span>
+            </div>
+            {selectedFiadoOrder.sellerName && (
+              <div className="flex justify-between text-[11px]">
+                <span>ATENDENTE:</span>
+                <span>{selectedFiadoOrder.sellerName}</span>
+              </div>
+            )}
+            {selectedFiadoOrder.orderType && (
+              <div className="flex justify-between text-[11px]">
+                <span>TIPO:</span>
+                <span>{selectedFiadoOrder.orderType === OrderType.TAKEAWAY ? 'PARA VIAGEM' : 'NO LOCAL'}</span>
+              </div>
+            )}
+          </div>
+
+          <div className="my-2 border-t border-b border-dotted border-black py-1">
+            <div className="font-bold text-xs uppercase mb-1 flex justify-between">
+              <span>ITENS CONSUMIDOS</span>
+              <span>VALOR</span>
+            </div>
+            <div className="space-y-1.5">
+              {(selectedFiadoOrder.items || []).map((item, idx) => (
+                <div key={idx} className="text-xs">
+                  <div className="flex justify-between font-bold">
+                    <span>{item.quantity}x {item.name}</span>
+                    <span>{fmt(item.price * item.quantity)}</span>
+                  </div>
+                  {item.addons && item.addons.length > 0 && (
+                    <div className="text-[11px] text-gray-700 pl-3">
+                      + {item.addons.map(a => `${a.name} (${fmt(a.price)})`).join(', ')}
+                    </div>
+                  )}
+                  {item.notes && (
+                    <div className="text-[10px] text-gray-600 italic pl-3">
+                      Obs: {item.notes}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-1 text-xs">
+            <div className="flex justify-between font-bold">
+              <span>TOTAL DA COMANDA:</span>
+              <span>{fmt(selectedFiadoOrder.total)}</span>
+            </div>
+            <div className="flex justify-between font-black text-sm bg-black text-white p-1 rounded">
+              <span>VALOR LANÇADO EM FIADO:</span>
+              <span>{fmt('fiadoAmount' in selectedFiadoOrder ? selectedFiadoOrder.fiadoAmount : selectedFiadoOrder.total)}</span>
+            </div>
+            <div className="flex justify-between font-bold pt-1 border-t border-dotted border-black">
+              <span>SALDO DEVEDOR ATUAL DO CLIENTE:</span>
+              <span>{fmt(customer.balance)}</span>
+            </div>
+          </div>
+        </div>
+      ) : type === 'PAYMENT_RECEIPT' && latestPayment ? (
         <div className="my-2 py-2 border-b border-dashed border-black space-y-1">
           <div className="text-center font-bold text-sm">PAGAMENTO RECEBIDO</div>
           <div className="flex justify-between font-black text-base my-1">

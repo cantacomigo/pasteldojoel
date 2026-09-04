@@ -1,12 +1,13 @@
 "use client";
 
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { 
   X, Phone, MessageSquare, Printer, DollarSign, Calendar, 
   ShoppingBag, CheckCircle2, AlertTriangle, ArrowDownLeft, 
-  CreditCard, Edit3, ShieldAlert, Sparkles, Receipt
+  CreditCard, Edit3, ShieldAlert, Sparkles, Receipt,
+  ChevronDown, ChevronUp, User, MapPin
 } from 'lucide-react';
-import { MonthlyCustomer, Order, CustomerPaymentRecord, PaymentMethod } from '@/types';
+import { MonthlyCustomer, Order, CustomerPaymentRecord, PaymentMethod, CustomerFiadoOrder, OrderType } from '@/types';
 
 interface CustomerDetailsModalProps {
   customer: MonthlyCustomer;
@@ -15,6 +16,7 @@ interface CustomerDetailsModalProps {
   onOpenPay: (customer: MonthlyCustomer) => void;
   onOpenEdit: (customer: MonthlyCustomer) => void;
   onPrintStatement: (customer: MonthlyCustomer) => void;
+  onPrintFiadoOrder?: (customer: MonthlyCustomer, order: CustomerFiadoOrder | Order) => void;
 }
 
 const CustomerDetailsModal: React.FC<CustomerDetailsModalProps> = ({
@@ -23,23 +25,69 @@ const CustomerDetailsModal: React.FC<CustomerDetailsModalProps> = ({
   onClose,
   onOpenPay,
   onOpenEdit,
-  onPrintStatement
+  onPrintStatement,
+  onPrintFiadoOrder
 }) => {
   const [activeTab, setActiveTab] = useState<'ALL' | 'ORDERS' | 'PAYMENTS'>('ALL');
+  const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
 
   const fmt = (val: number) => 
     val.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 
-  // Customer orders (filter by customerId or matching name)
-  const customerOrders = orders.filter(o => 
-    (o.customerId && o.customerId === customer.id) ||
-    o.customerName.toLowerCase().trim() === customer.name.toLowerCase().trim()
-  ).sort((a, b) => b.createdAt - a.createdAt);
+  // Combina as comandas guardadas no registro do cliente (customer.fiadoOrders) com as comandas do sistema
+  const allCustomerOrders = useMemo(() => {
+    const map = new Map<string, CustomerFiadoOrder & { status?: string }>();
+
+    // 1. Prioriza as comandas salvas no registro do próprio cliente (permanentes)
+    (customer.fiadoOrders || []).forEach(fo => {
+      map.set(fo.orderId, {
+        ...fo,
+        status: 'CLOSED'
+      });
+    });
+
+    // 2. Adiciona/atualiza com as comandas do sistema
+    orders.filter(o => 
+      (o.customerId && o.customerId === customer.id) ||
+      o.customerName.toLowerCase().trim() === customer.name.toLowerCase().trim()
+    ).forEach(o => {
+      let fiadoAmt = 0;
+      if (o.payments && o.payments.length > 0) {
+        fiadoAmt = o.payments
+          .filter(p => p.method === PaymentMethod.FIADO)
+          .reduce((sum, p) => sum + p.amount, 0);
+      } else if (o.paymentMethod === PaymentMethod.FIADO) {
+        fiadoAmt = o.total;
+      }
+
+      const existing = map.get(o.id);
+      if (!existing) {
+        map.set(o.id, {
+          orderId: o.id,
+          customerName: o.customerName,
+          createdAt: o.createdAt,
+          closedAt: o.closedAt,
+          total: o.total,
+          fiadoAmount: fiadoAmt > 0 ? fiadoAmt : o.total,
+          paymentMethod: o.paymentMethod,
+          payments: o.payments,
+          items: o.items || [],
+          sellerName: o.sellerName,
+          orderType: o.orderType,
+          status: o.status
+        });
+      } else if (o.status) {
+        existing.status = o.status;
+      }
+    });
+
+    return Array.from(map.values()).sort((a, b) => b.createdAt - a.createdAt);
+  }, [customer, orders]);
 
   const payments = (customer.payments || []).sort((a, b) => b.date - a.date);
 
   // Calculate totals
-  const totalConsumed = customerOrders.reduce((sum, o) => sum + (o.total || 0), 0);
+  const totalConsumed = allCustomerOrders.reduce((sum, o) => sum + (o.total || 0), 0);
   const totalPaid = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
 
   // Credit limit calculation
@@ -62,6 +110,10 @@ const CustomerDetailsModal: React.FC<CustomerDetailsModalProps> = ({
   };
 
   const whatsappUrl = getWhatsAppLink();
+
+  const toggleOrderExpand = (orderId: string) => {
+    setExpandedOrderId(prev => prev === orderId ? null : orderId);
+  };
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-[110] p-3 sm:p-4 animate-in fade-in duration-200">
@@ -141,7 +193,7 @@ const CustomerDetailsModal: React.FC<CustomerDetailsModalProps> = ({
                 {fmt(totalConsumed)}
               </p>
               <p className="text-[9px] text-slate-400 font-bold uppercase tracking-wider mt-0.5">
-                {customerOrders.length} comanda(s)
+                {allCustomerOrders.length} comanda(s) registrada(s)
               </p>
             </div>
 
@@ -232,7 +284,7 @@ const CustomerDetailsModal: React.FC<CustomerDetailsModalProps> = ({
                 : 'text-slate-500 hover:text-slate-900'
             }`}
           >
-            Tudo ({customerOrders.length + payments.length})
+            Tudo ({allCustomerOrders.length + payments.length})
           </button>
           <button
             type="button"
@@ -244,7 +296,7 @@ const CustomerDetailsModal: React.FC<CustomerDetailsModalProps> = ({
             }`}
           >
             <ShoppingBag size={13} />
-            Comandas ({customerOrders.length})
+            Comandas Fiado ({allCustomerOrders.length})
           </button>
           <button
             type="button"
@@ -262,48 +314,138 @@ const CustomerDetailsModal: React.FC<CustomerDetailsModalProps> = ({
 
         {/* Scrollable Timeline / History */}
         <div className="overflow-y-auto p-6 space-y-3 flex-1 bg-white">
-          {activeTab !== 'PAYMENTS' && customerOrders.length > 0 && (
+          {activeTab !== 'PAYMENTS' && allCustomerOrders.length > 0 && (
             <div className="space-y-3">
               {activeTab === 'ALL' && (
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-1.5">
-                  <ShoppingBag size={12} /> Comandas e Consumos
+                  <ShoppingBag size={12} /> Comandas Fiado Guardadas no Cadastro
                 </p>
               )}
-              {customerOrders.map(order => (
-                <div 
-                  key={order.id} 
-                  className="p-4 rounded-2xl bg-black/[0.02] border border-black/[0.05] hover:border-brand-600/30 transition-all flex justify-between items-start gap-4"
-                >
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <span className="font-bold text-xs text-slate-900 uppercase">
-                        Comanda #{order.id.slice(0, 6).toUpperCase()}
-                      </span>
-                      <span className={`text-[9px] font-bold px-2 py-0.5 rounded-md uppercase tracking-wider ${
-                        order.status === 'CLOSED' ? 'bg-slate-200 text-slate-700' : 'bg-emerald-100 text-emerald-700'
-                      }`}>
-                        {order.status === 'CLOSED' ? 'Finalizada' : 'Aberta'}
-                      </span>
+              {allCustomerOrders.map(order => {
+                const isExpanded = expandedOrderId === order.orderId;
+                return (
+                  <div 
+                    key={order.orderId} 
+                    className="p-4 rounded-2xl bg-black/[0.02] border border-black/[0.05] hover:border-brand-600/30 transition-all space-y-3"
+                  >
+                    <div className="flex justify-between items-start gap-4">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-black text-xs text-slate-900 uppercase">
+                            Comanda #{order.orderId.slice(0, 6).toUpperCase()}
+                          </span>
+                          <span className={`text-[9px] font-bold px-2 py-0.5 rounded-md uppercase tracking-wider ${
+                            order.status === 'CLOSED' ? 'bg-slate-200 text-slate-700' : 'bg-emerald-100 text-emerald-700'
+                          }`}>
+                            {order.status === 'CLOSED' ? 'Finalizada' : 'Aberta'}
+                          </span>
+                          {order.orderType && (
+                            <span className="text-[9px] font-medium px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 flex items-center gap-1">
+                              <MapPin size={10} />
+                              {order.orderType === OrderType.TAKEAWAY ? 'Viagem' : 'No Local'}
+                            </span>
+                          )}
+                          {order.sellerName && (
+                            <span className="text-[9px] font-medium px-2 py-0.5 rounded-md bg-blue-50 text-blue-700 flex items-center gap-1">
+                              <User size={10} />
+                              {order.sellerName}
+                            </span>
+                          )}
+                        </div>
+
+                        <p className="text-[11px] text-slate-400 font-medium">
+                          {new Date(order.createdAt).toLocaleDateString('pt-BR')} às {new Date(order.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                        </p>
+
+                        {order.items && order.items.length > 0 && !isExpanded && (
+                          <p className="text-xs text-slate-600 mt-1 line-clamp-1">
+                            {order.items.map(item => `${item.quantity}x ${item.name}`).join(' • ')}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="text-right shrink-0">
+                        <p className="text-base font-black text-slate-900 font-display italic">
+                          {fmt(order.fiadoAmount || order.total)}
+                        </p>
+                        <span className="text-[9px] font-bold uppercase tracking-wider text-amber-600 block">
+                          Fiado {order.fiadoAmount && order.fiadoAmount < order.total ? `(de ${fmt(order.total)})` : ''}
+                        </span>
+                      </div>
                     </div>
-                    <p className="text-[11px] text-slate-400 font-medium">
-                      {new Date(order.createdAt).toLocaleDateString('pt-BR')} às {new Date(order.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
-                    </p>
-                    {order.items && order.items.length > 0 && (
-                      <p className="text-xs text-slate-600 mt-1">
-                        {order.items.map(item => `${item.quantity}x ${item.name}`).join(' • ')}
-                      </p>
+
+                    {/* Botões de Ação da Comanda (Conferir e Imprimir) */}
+                    <div className="flex items-center justify-between pt-2 border-t border-black/[0.05] text-xs">
+                      <button
+                        type="button"
+                        onClick={() => toggleOrderExpand(order.orderId)}
+                        className="inline-flex items-center gap-1.5 font-black text-[11px] text-brand-600 hover:text-brand-700 uppercase tracking-wider py-1 px-2 rounded-lg hover:bg-brand-50 transition-colors"
+                      >
+                        {isExpanded ? (
+                          <>
+                            <ChevronUp size={14} /> Recolher Itens
+                          </>
+                        ) : (
+                          <>
+                            <ChevronDown size={14} /> Conferir Itens ({order.items?.length || 0})
+                          </>
+                        )}
+                      </button>
+
+                      {onPrintFiadoOrder && (
+                        <button
+                          type="button"
+                          onClick={() => onPrintFiadoOrder(customer, order)}
+                          className="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 py-1.5 px-3 rounded-xl transition-all"
+                          title="Imprimir comprovante térmico desta comanda"
+                        >
+                          <Printer size={12} />
+                          Imprimir Comanda Fiado
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Detalhamento de Itens para Conferimento */}
+                    {isExpanded && order.items && order.items.length > 0 && (
+                      <div className="p-3 bg-white rounded-xl border border-black/[0.08] space-y-2 text-xs animate-in fade-in duration-150">
+                        <div className="font-black text-[10px] uppercase tracking-wider text-slate-400 border-b border-black/[0.05] pb-1 flex justify-between">
+                          <span>Discriminação do Consumo</span>
+                          <span>Subtotal</span>
+                        </div>
+                        <div className="divide-y divide-black/[0.03] space-y-1.5">
+                          {order.items.map((item, idx) => (
+                            <div key={idx} className="pt-1.5 flex justify-between items-start gap-2">
+                              <div>
+                                <span className="font-bold text-slate-800">
+                                  {item.quantity}x {item.name}
+                                </span>
+                                {item.addons && item.addons.length > 0 && (
+                                  <p className="text-[11px] text-slate-500 pl-2">
+                                    + {item.addons.map(a => `${a.name} (${fmt(a.price)})`).join(', ')}
+                                  </p>
+                                )}
+                                {item.notes && (
+                                  <p className="text-[10px] italic text-amber-700 pl-2">
+                                    Obs: {item.notes}
+                                  </p>
+                                )}
+                              </div>
+                              <span className="font-bold text-slate-900 shrink-0">
+                                {fmt(item.price * item.quantity)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="pt-2 border-t border-black/[0.05] flex justify-between font-black text-slate-900 text-xs">
+                          <span>Total da Comanda:</span>
+                          <span>{fmt(order.total)}</span>
+                        </div>
+                      </div>
                     )}
                   </div>
-                  <div className="text-right shrink-0">
-                    <p className="text-base font-black text-slate-900 font-display italic">
-                      {fmt(order.total)}
-                    </p>
-                    <span className="text-[9px] font-bold uppercase tracking-wider text-amber-600">
-                      Débito
-                    </span>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
 
@@ -311,7 +453,7 @@ const CustomerDetailsModal: React.FC<CustomerDetailsModalProps> = ({
             <div className="space-y-3 mt-4">
               {activeTab === 'ALL' && (
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-1.5">
-                  <ArrowDownLeft size={12} className="text-emerald-600" /> Histórico de Pagamentos
+                  <ArrowDownLeft size={12} className="text-emerald-600" /> Histórico de Pagamentos Recebidos
                 </p>
               )}
               {payments.map(pay => (
@@ -350,7 +492,7 @@ const CustomerDetailsModal: React.FC<CustomerDetailsModalProps> = ({
             </div>
           )}
 
-          {customerOrders.length === 0 && payments.length === 0 && (
+          {allCustomerOrders.length === 0 && payments.length === 0 && (
             <div className="text-center py-12 text-slate-400">
               <Receipt size={36} className="mx-auto mb-2 opacity-40" />
               <p className="text-xs font-bold uppercase tracking-wider">Nenhuma movimentação registrada</p>

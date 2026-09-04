@@ -177,6 +177,22 @@ export interface CustomerPaymentRecord {
   notes?: string;
 }
 
+export interface CustomerFiadoOrder {
+  orderId: string;
+  orderNumber?: string;
+  customerName: string;
+  createdAt: number;
+  closedAt?: number;
+  total: number;
+  fiadoAmount: number;
+  paymentMethod?: PaymentMethod;
+  payments?: Payment[];
+  items: OrderItem[];
+  sellerName?: string;
+  orderType?: OrderType;
+  notes?: string;
+}
+
 export interface MonthlyCustomer {
   id: string;
   name: string;
@@ -186,6 +202,7 @@ export interface MonthlyCustomer {
   creditLimit?: number;
   balance: number;
   payments?: CustomerPaymentRecord[];
+  fiadoOrders?: CustomerFiadoOrder[];
   createdAt?: number;
   syncStatus?: 'pending' | 'synced' | 'deleted';
   updatedAt?: number;

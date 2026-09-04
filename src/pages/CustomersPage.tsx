@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState, useMemo } from 'react';
 import { StorageService } from '@/services/storageService';
-import { MonthlyCustomer, Order, CustomerPaymentRecord } from '@/types';
+import { MonthlyCustomer, Order, CustomerPaymentRecord, CustomerFiadoOrder } from '@/types';
 import { 
   Users, Plus, Search, Phone, DollarSign, Trash2, 
   ChevronRight, ArrowUpRight, History, CheckCircle2,
@@ -13,6 +13,7 @@ import CustomerDetailsModal from '@/components/customers/CustomerDetailsModal';
 import CustomerPaymentModal from '@/components/customers/CustomerPaymentModal';
 import CustomerFormModal from '@/components/customers/CustomerFormModal';
 import CustomerStatementReceipt from '@/components/customers/CustomerStatementReceipt';
+import ConfirmationModal from '@/components/modals/ConfirmationModal';
 import { subscribeToCollection } from '@/integrations/firebase/config';
 
 type CustomerFilter = 'ALL' | 'WITH_DEBT' | 'PAID' | 'OVER_LIMIT';
@@ -51,15 +52,21 @@ const CustomersPage: React.FC = () => {
   const [isPayModalOpen, setIsPayModalOpen] = useState(false);
   const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false);
   const [selectedCustomer, setSelectedCustomer] = useState<MonthlyCustomer | null>(null);
+  const [customerToDelete, setCustomerToDelete] = useState<MonthlyCustomer | null>(null);
+  const [isDeletingCustomer, setIsDeletingCustomer] = useState(false);
 
   // Print Receipt State
   const [printCustomer, setPrintCustomer] = useState<MonthlyCustomer | null>(null);
-  const [printType, setPrintType] = useState<'STATEMENT' | 'PAYMENT_RECEIPT'>('STATEMENT');
+  const [printType, setPrintType] = useState<'STATEMENT' | 'PAYMENT_RECEIPT' | 'FIADO_ORDER_RECEIPT'>('STATEMENT');
   const [latestPaymentRecord, setLatestPaymentRecord] = useState<CustomerPaymentRecord | undefined>();
+  const [printFiadoOrder, setPrintFiadoOrder] = useState<CustomerFiadoOrder | Order | undefined>();
 
   const loadData = async (silent = false) => {
     if (!silent && customers.length === 0) setIsLoading(true);
     try {
+      // Sincroniza qualquer comanda fiado do sistema diretamente no cadastro dos clientes para conferimento e controle
+      await StorageService.syncAllFiadoOrdersToCustomers();
+
       const [customersData, ordersData] = await Promise.all([
         StorageService.getCustomers(),
         StorageService.getOrders()
@@ -151,28 +158,38 @@ const CustomersPage: React.FC = () => {
     setIsFormModalOpen(true);
   };
 
-  const handleDelete = async (c: MonthlyCustomer) => {
-    if (c.balance > 0) {
-      if (!confirm(`Atenção: ${c.name} possui um saldo devedor de ${fmt(c.balance)}. Deseja realmente excluir este mensalista?`)) {
-        return;
+  const confirmDeleteCustomer = async () => {
+    if (!customerToDelete) return;
+    setIsDeletingCustomer(true);
+    try {
+      await StorageService.deleteCustomer(customerToDelete.id);
+      if (selectedCustomer?.id === customerToDelete.id) {
+        setIsDetailsModalOpen(false);
+        setSelectedCustomer(null);
       }
-    } else {
-      if (!confirm(`Deseja realmente excluir ${c.name}?`)) {
-        return;
-      }
+      setCustomerToDelete(null);
+      loadData(true);
+    } catch (e) {
+      console.error("Erro ao excluir mensalista:", e);
+    } finally {
+      setIsDeletingCustomer(false);
     }
-
-    await StorageService.deleteCustomer(c.id);
-    if (selectedCustomer?.id === c.id) {
-      setIsDetailsModalOpen(false);
-      setSelectedCustomer(null);
-    }
-    loadData(true);
   };
 
   const handlePrintStatement = (c: MonthlyCustomer) => {
     setPrintCustomer(c);
     setPrintType('STATEMENT');
+    setPrintFiadoOrder(undefined);
+    setLatestPaymentRecord(undefined);
+    setTimeout(() => {
+      window.print();
+    }, 200);
+  };
+
+  const handlePrintFiadoOrder = (c: MonthlyCustomer, order: CustomerFiadoOrder | Order) => {
+    setPrintCustomer(c);
+    setPrintType('FIADO_ORDER_RECEIPT');
+    setPrintFiadoOrder(order);
     setLatestPaymentRecord(undefined);
     setTimeout(() => {
       window.print();
@@ -191,6 +208,7 @@ const CustomersPage: React.FC = () => {
     if (shouldPrint) {
       setPrintCustomer(updatedCustomer);
       setPrintType('PAYMENT_RECEIPT');
+      setPrintFiadoOrder(undefined);
       setLatestPaymentRecord(latestPayment);
       setTimeout(() => {
         window.print();
@@ -568,7 +586,7 @@ const CustomersPage: React.FC = () => {
                         {/* Excluir */}
                         <button 
                           type="button"
-                          onClick={() => handleDelete(c)}
+                          onClick={() => setCustomerToDelete(c)}
                           className="p-2.5 rounded-xl bg-red-600/10 text-red-600 border border-red-500/20 hover:bg-red-600 hover:text-white transition-all shadow-sm"
                           title="Excluir Mensalista"
                         >
@@ -613,6 +631,7 @@ const CustomersPage: React.FC = () => {
             handleOpenEdit(c);
           }}
           onPrintStatement={(c) => handlePrintStatement(c)}
+          onPrintFiadoOrder={handlePrintFiadoOrder}
         />
       )}
 
@@ -641,6 +660,25 @@ const CustomersPage: React.FC = () => {
         />
       )}
 
+      {/* Modal de Confirmação de Exclusão */}
+      {customerToDelete && (
+        <ConfirmationModal
+          isOpen={true}
+          title="Excluir Mensalista"
+          message={
+            customerToDelete.balance > 0
+              ? `Atenção: "${customerToDelete.name}" possui um débito em aberto de ${fmt(customerToDelete.balance)}. Deseja realmente excluir este cadastro? As comandas e registros vinculados serão removidos do controle.`
+              : `Deseja realmente excluir o cadastro de "${customerToDelete.name}"?`
+          }
+          confirmLabel="Excluir Mensalista"
+          cancelLabel="Cancelar"
+          variant="destructive"
+          isLoading={isDeletingCustomer}
+          onConfirm={confirmDeleteCustomer}
+          onCancel={() => setCustomerToDelete(null)}
+        />
+      )}
+
       {/* Thermal Receipt Print Portal */}
       {printCustomer && (
         <CustomerStatementReceipt
@@ -652,6 +690,7 @@ const CustomersPage: React.FC = () => {
           payments={printCustomer.payments || []}
           type={printType}
           latestPayment={latestPaymentRecord}
+          selectedFiadoOrder={printFiadoOrder}
         />
       )}
     </div>
